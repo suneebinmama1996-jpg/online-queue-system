@@ -1,0 +1,6 @@
+{
+  "name": "ระบบจัดการคิวออนไลน์และแสดงผลทีวี",
+  "description": "ระบบจองคิวออนไลน์ คิวแท็บเล็ต เรียกคิวด้วยเสียงภาษาไทย แจ้งเตือนผ่าน LINE และแสดงผลบนหน้าจอทีวีคู่กับวีดิโอเรียลไทม์",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
