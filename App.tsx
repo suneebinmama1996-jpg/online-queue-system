@@ -1,0 +1,793 @@
+import React, { useState, useEffect, useRef } from "react";
+import { 
+  Smartphone, 
+  Users, 
+  Tv, 
+  Settings, 
+  Layers, 
+  Volume2, 
+  VolumeX, 
+  Bell, 
+  Printer, 
+  ChevronRight, 
+  EyeOff, 
+  Eye,
+  Info,
+  ExternalLink,
+  Palette,
+  Sparkles,
+  Check,
+  Grid
+} from "lucide-react";
+import CustomerView from "./components/CustomerView";
+import StaffView from "./components/StaffView";
+import TvView from "./components/TvView";
+import SettingsView from "./components/SettingsView";
+import PrintSettingsView from "./components/PrintSettingsView";
+import ReceiptModal from "./components/ReceiptModal";
+import CustomerQueueTrackingView from "./components/CustomerQueueTrackingView";
+import { Queue, LineMessage, LineConfig, Branch, Service } from "./types";
+import { speakThai, generateQueueSpeakText } from "./lib/voice";
+import { ThemeConfig, themePresetMenus, getThemeCssContent } from "./lib/theme";
+
+export default function App() {
+  // Navigation / Role selection
+  const [activeRole, setActiveRole] = useState<"customer" | "staff" | "tv" | "settings" | "print-settings" | "tracking">("customer");
+  const [hideSwitcher, setHideSwitcher] = useState(false);
+  const [selectedReceiptQueues, setSelectedReceiptQueues] = useState<Queue[]>([]);
+  const [trackQueueId, setTrackQueueId] = useState<string | null>(null);
+
+  // Check URL for track_queue on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const trackId = params.get("track_queue");
+    if (trackId) {
+      setTrackQueueId(trackId);
+      setActiveRole("tracking");
+      setHideSwitcher(true); // hide header for mobile tracking view
+    }
+  }, []);
+  
+  // Theme selection and customization states
+  const [activeTheme, setActiveTheme] = useState<ThemeConfig>(() => {
+    const saved = localStorage.getItem("active_theme_config");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error("Failed to parse active theme configuration:", e);
+      }
+    }
+    return themePresetMenus[0]; // Default Sakura Classic
+  });
+  
+  const [showThemePanel, setShowThemePanel] = useState(false);
+
+  const updateActiveTheme = (newTheme: ThemeConfig) => {
+    setActiveTheme(newTheme);
+    localStorage.setItem("active_theme_config", JSON.stringify(newTheme));
+  };
+
+  // Dynamic ticking time for Vibrant header
+  const [currentTime, setCurrentTime] = useState<Date>(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // App States
+  const [queues, setQueues] = useState<Queue[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
+  const [lineMessages, setLineMessages] = useState<LineMessage[]>([]);
+  const [lineConfig, setLineConfig] = useState<LineConfig>({
+    token: "",
+    enabled: true,
+    simulateOnly: true
+  });
+  const [selectedReceiptQueue, setSelectedReceiptQueue] = useState<Queue | null>(null);
+  const [enableAudioAnnouncement, setEnableAudioAnnouncement] = useState(true);
+  const [latestAnnouncement, setLatestAnnouncement] = useState<string | null>(null);
+  const [isAnnouncing, setIsAnnouncing] = useState(false);
+
+  // Thai Speech Customization States
+  const [speechRate, setSpeechRateState] = useState<number>(() => {
+    const saved = localStorage.getItem("speech_rate");
+    return saved ? parseFloat(saved) : 0.65; // Much slower and highly polite default speed
+  });
+  const [speechPitch, setSpeechPitchState] = useState<number>(() => {
+    const saved = localStorage.getItem("speech_pitch");
+    return saved ? parseFloat(saved) : 1.25; // Sweet, polite, slightly higher pitch
+  });
+  const [selectedVoiceName, setSelectedVoiceNameState] = useState<string>(() => {
+    return localStorage.getItem("speech_voice_name") || "";
+  });
+  const [speechEngine, setSpeechEngineState] = useState<"google" | "local">(() => {
+    const saved = localStorage.getItem("speech_engine");
+    return (saved as "google" | "local") || "google"; // Default to Google TTS
+  });
+  const [speechSuffix, setSpeechSuffixState] = useState<string>(() => {
+    return localStorage.getItem("speech_suffix") || "ค่ะ";
+  });
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+
+  const setSpeechRate = (val: number) => {
+    setSpeechRateState(val);
+    localStorage.setItem("speech_rate", val.toString());
+  };
+
+  const setSpeechPitch = (val: number) => {
+    setSpeechPitchState(val);
+    localStorage.setItem("speech_pitch", val.toString());
+  };
+
+  const setSelectedVoiceName = (val: string) => {
+    setSelectedVoiceNameState(val);
+    localStorage.setItem("speech_voice_name", val);
+  };
+
+  const setSpeechEngine = (val: "google" | "local") => {
+    setSpeechEngineState(val);
+    localStorage.setItem("speech_engine", val);
+  };
+
+  const setSpeechSuffix = (val: string) => {
+    setSpeechSuffixState(val);
+    localStorage.setItem("speech_suffix", val);
+  };
+
+  // Load voices on component mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      const loadVoices = () => {
+        const allVoices = window.speechSynthesis.getVoices();
+        setAvailableVoices(allVoices);
+      };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+      return () => {
+        window.speechSynthesis.onvoiceschanged = null;
+      };
+    }
+  }, []);
+
+  // Set up real-time Server-Sent Events (SSE) connection
+  useEffect(() => {
+    // Connect to SSE endpoint exposed by server.ts
+    const eventSource = new EventSource("/api/events");
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        if (data.type === "INITIAL_STATE") {
+          setQueues(data.queues || []);
+          if (data.branches) setBranches(data.branches);
+          if (data.services) setServices(data.services);
+          if (data.lineConfig) {
+            setLineConfig(data.lineConfig);
+          }
+        } else if (data.type === "QUEUE_UPDATE") {
+          setQueues(data.queues || []);
+        } else if (data.type === "CONFIG_UPDATE") {
+          if (data.branches) setBranches(data.branches);
+          if (data.services) setServices(data.services);
+        } else if (data.type === "CALL_ANNOUNCEMENT") {
+          const calledQueue = data.queue as Queue;
+          
+          // Separate branch filtering for the TV display:
+          // If the device has TV display open, check if it has been filtered to a specific branch.
+          const tvBranchId = localStorage.getItem("tv_branch_id") || "all";
+          if (tvBranchId !== "all" && calledQueue.branchId !== tvBranchId) {
+            console.log(`[SSE] Skipping audio & toast for queue ${calledQueue.queueNo} because TV is filtered to branch ${tvBranchId} (queue branch: ${calledQueue.branchId})`);
+            return;
+          }
+
+          // Trigger voice announcement on browser
+          if (enableAudioAnnouncement) {
+            announceQueueRef.current(calledQueue.queueNo, calledQueue.counterNo || "ช่องบริการ");
+          }
+          // Display visual toast alert
+          setLatestAnnouncement(`เรียกคิวหมายเลข ${calledQueue.queueNo} ที่ ${calledQueue.counterNo}!`);
+          setTimeout(() => setLatestAnnouncement(null), 5000);
+        } else if (data.type === "LINE_SIMULATION") {
+          const message: LineMessage = {
+            phoneNumber: data.phoneNumber,
+            message: data.message,
+            timestamp: data.timestamp
+          };
+          setLineMessages((prev) => [message, ...prev]);
+        }
+      } catch (err) {
+        console.error("Failed to parse SSE event:", err);
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.error("SSE connection error, retrying...", err);
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [enableAudioAnnouncement]);
+
+  // Voice announcement helper utilizing SpeechSynthesis (Thai language spelling)
+  const announceQueue = (queueNo: string, counterNo: string) => {
+    setIsAnnouncing(true);
+    
+    // Safety fallback timer to automatically reset announcement state after 12 seconds max
+    const safetyTimeout = setTimeout(() => {
+      setIsAnnouncing(false);
+    }, 12000);
+
+    try {
+      // 1. Play professional chime sound "ding-dong" using browser audio oscillators
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      
+      osc.frequency.setValueAtTime(587.33, audioContext.currentTime); // D5
+      gain.gain.setValueAtTime(0.15, audioContext.currentTime);
+      osc.start();
+      osc.stop(audioContext.currentTime + 0.15);
+      
+      setTimeout(() => {
+        const osc2 = audioContext.createOscillator();
+        const gain2 = audioContext.createGain();
+        osc2.connect(gain2);
+        gain2.connect(audioContext.destination);
+        osc2.frequency.setValueAtTime(659.25, audioContext.currentTime); // E5
+        gain2.gain.setValueAtTime(0.15, audioContext.currentTime);
+        osc2.start();
+        osc2.stop(audioContext.currentTime + 0.3);
+      }, 150);
+    } catch (e) {
+      console.error("Audio oscillator chime failed:", e);
+    }
+
+    // 2. Play vocal reading of queue number in Thai
+    setTimeout(() => {
+      const text = generateQueueSpeakText(queueNo, counterNo);
+      
+      speakThai(
+        text,
+        speechRate,
+        () => setIsAnnouncing(true),
+        () => {
+          setIsAnnouncing(false);
+          clearTimeout(safetyTimeout);
+        }
+      );
+    }, 450);
+  };
+
+  const announceQueueRef = useRef(announceQueue);
+  useEffect(() => {
+    announceQueueRef.current = announceQueue;
+  }, [announceQueue]);
+
+  // ---------------- API Proxy Triggers ----------------
+
+  const handleBookQueue = async (name: string, phone: string, serviceType: string, branchId: string) => {
+    const res = await fetch("/api/queues", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customerName: name, phoneNumber: phone, serviceType, branchId }),
+    });
+    if (!res.ok) throw new Error("Failed to book queue");
+    return await res.json();
+  };
+
+  const handleCallQueue = async (id: string, counterNo: string) => {
+    const res = await fetch(`/api/queues/${id}/call`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ counterNo }),
+    });
+    if (!res.ok) throw new Error("Failed to call queue");
+    return await res.json();
+  };
+
+  const handleUpdateStatus = async (id: string, status: "waiting" | "calling" | "completed" | "cancelled") => {
+    const res = await fetch(`/api/queues/${id}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error("Failed to update status");
+    return await res.json();
+  };
+
+  const handleResetQueues = async () => {
+    const res = await fetch("/api/queues/reset", { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to reset queues");
+    return await res.json();
+  };
+
+  const handleUpdateLineConfig = async (newConfig: Partial<LineConfig>) => {
+    const res = await fetch("/api/line-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newConfig),
+    });
+    if (!res.ok) throw new Error("Failed to update line config");
+    const data = await res.json();
+    setLineConfig(data);
+    return data;
+  };
+
+  const handleAddBranch = async (name: string) => {
+    const res = await fetch("/api/branches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error("Failed to add branch");
+    return await res.json();
+  };
+
+  const handleDeleteBranch = async (id: string) => {
+    const res = await fetch(`/api/branches/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to delete branch");
+    return await res.json();
+  };
+
+  const handleAddService = async (id: string, name: string, prefix: string, description: string) => {
+    const res = await fetch("/api/services", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, name, prefix, description }),
+    });
+    if (!res.ok) throw new Error("Failed to add service");
+    return await res.json();
+  };
+
+  const handleDeleteService = async (id: string) => {
+    const res = await fetch(`/api/services/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to delete service");
+    return await res.json();
+  };
+
+  return (
+    <div className="min-h-screen theme-grid-bg flex flex-col justify-between font-sans text-slate-800 transition-colors duration-300">
+      
+      {/* Dynamic Theme Stylesheet Injector */}
+      <style dangerouslySetInnerHTML={{ __html: getThemeCssContent(activeTheme) }} />
+
+      {/* Visual Toast Notification popup */}
+      {latestAnnouncement && (
+        <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-50 bg-pink-600 text-white font-bold py-3 px-6 rounded-2xl shadow-xl flex items-center gap-3 animate-slide-up border border-pink-500">
+          <span className="w-2.5 h-2.5 bg-white rounded-full animate-ping shrink-0"></span>
+          <p className="text-xs tracking-wide">{latestAnnouncement}</p>
+        </div>
+      )}
+
+      {/* Main Container */}
+      <div className="flex-1 w-full flex flex-col">
+        
+        {/* 1. Header with Role Switcher */}
+        {!hideSwitcher && (
+          <header className="bg-white border-b border-pink-100/60 sticky top-0 z-40 shadow-xs">
+            {/* Theme Builder Drawer Section */}
+            {showThemePanel && (
+              <div className="bg-white border-b border-pink-100 shadow-md animate-slide-down">
+                <div className="max-w-6xl mx-auto px-4 py-5">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+                    <div className="flex items-center gap-2">
+                      <Palette className="w-5 h-5 text-pink-500 animate-pulse" />
+                      <h2 className="text-sm font-black text-slate-900">แผงปรับแต่งระบบธีมสีและสไตล์การแสดงผล (Visual Theme Builder)</h2>
+                    </div>
+                    <button 
+                      onClick={() => setShowThemePanel(false)}
+                      className="text-xs text-slate-400 hover:text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl transition-all cursor-pointer"
+                    >
+                      เสร็จสิ้น ✕
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {/* Col 1: Preset Quick Selection */}
+                    <div className="bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
+                      <p className="text-xs font-bold text-slate-500 mb-2.5 flex items-center gap-1">
+                        <Sparkles className="w-3.5 h-3.5 text-yellow-500" />
+                        1. เลือกธีมพรีเซตสำเร็จรูป (Presets)
+                      </p>
+                      <div className="space-y-1.5">
+                        {themePresetMenus.map((preset) => (
+                          <button
+                            key={preset.id}
+                            onClick={() => updateActiveTheme(preset)}
+                            className={`w-full text-left py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-between cursor-pointer ${
+                              activeTheme.id === preset.id 
+                                ? "bg-pink-600 text-white shadow-md shadow-pink-600/10" 
+                                : "bg-white hover:bg-slate-100 text-slate-700 border border-slate-100"
+                            }`}
+                          >
+                            <span>{preset.name}</span>
+                            {activeTheme.id === preset.id && <Check className="w-4 h-4 text-white" />}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Col 2: Custom Hues & Background styles */}
+                    <div className="bg-slate-50/50 p-4 rounded-2xl border border-slate-100 flex flex-col justify-between gap-4">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2.5">2. เลือกโทนสีแอปย่อย (Accent Palette)</p>
+                        <div className="grid grid-cols-4 gap-1.5">
+                          {[
+                            { name: "pink", label: "🌸 ชมพู", hex: "#ec4899" },
+                            { name: "emerald", label: "🍃 เขียวมินต์", hex: "#10b981" },
+                            { name: "sky", label: "🌊 ฟ้าคราม", hex: "#0ea5e9" },
+                            { name: "indigo", label: "🔮 ม่วงอินดิโก", hex: "#6366f1" },
+                            { name: "amber", label: "🌅 ส้มอำพัน", hex: "#f59e0b" },
+                            { name: "slate", label: "🕶️ เทาดำ", hex: "#64748b" },
+                            { name: "purple", label: "🍇 บลูเบอร์รี่", hex: "#a855f7" },
+                            { name: "rose", label: "🌹 กุหลาบ", hex: "#f43f5e" }
+                          ].map((color) => (
+                            <button
+                              key={color.name}
+                              onClick={() => updateActiveTheme({ ...activeTheme, id: "custom", name: "🎨 กำหนดเอง (Custom)", colorName: color.name as any })}
+                              className={`py-1.5 px-1 rounded-xl text-[9px] font-bold border flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                                activeTheme.colorName === color.name 
+                                  ? "border-pink-600 bg-pink-50" 
+                                  : "border-slate-200 bg-white hover:bg-slate-50"
+                              }`}
+                            >
+                              <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: color.hex }}></span>
+                              <span>{color.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2 flex items-center gap-1">3. สไตล์ภาพพื้นหลังหลังคา (Page Style)</p>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {[
+                            { name: "slate", label: "สว่างสดใส" },
+                            { name: "cream", label: "ครีมถนอมสายตา" },
+                            { name: "dark", label: "มืดสนิทรัตติกาล" }
+                          ].map((bg) => (
+                            <button
+                              key={bg.name}
+                              onClick={() => updateActiveTheme({ ...activeTheme, id: "custom", name: "🎨 กำหนดเอง (Custom)", backgroundStyle: bg.name as any })}
+                              className={`py-1.5 rounded-lg text-[10px] font-bold border text-center transition-all cursor-pointer ${
+                                activeTheme.backgroundStyle === bg.name 
+                                  ? "border-pink-600 bg-pink-50 text-pink-700" 
+                                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                              }`}
+                            >
+                              {bg.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Col 3: Details Controls */}
+                    <div className="bg-slate-50/50 p-4 rounded-2xl border border-slate-100 space-y-4">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2">4. ระดับความโค้งมนการ์ด/ปุ่ม (Corner Rounding)</p>
+                        <div className="grid grid-cols-4 gap-1.5">
+                          {[
+                            { style: "none", label: "คมเหลี่ยม" },
+                            { style: "normal", label: "มนกำลังดี" },
+                            { style: "extra", label: "โค้งโดดเด่น" },
+                            { style: "full", label: "มนกลมมน" }
+                          ].map((round) => (
+                            <button
+                              key={round.style}
+                              onClick={() => updateActiveTheme({ ...activeTheme, id: "custom", name: "🎨 กำหนดเอง (Custom)", roundedStyle: round.style as any })}
+                              className={`py-1.5 rounded-lg text-[10px] font-bold border text-center transition-all cursor-pointer ${
+                                activeTheme.roundedStyle === round.style 
+                                  ? "border-pink-600 bg-pink-50 text-pink-700" 
+                                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                              }`}
+                            >
+                              {round.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2">5. ขนาดข้อความและภาพ (Text Zoom Scale)</p>
+                        <div className="grid grid-cols-4 gap-1">
+                          {[
+                            { value: 0.95, label: "กะทัดรัด" },
+                            { value: 1.0, label: "มาตรฐาน" },
+                            { value: 1.15, label: "ตัวใหญ่" },
+                            { value: 1.3, label: "ตัวใหญ่พิเศษ" }
+                          ].map((size) => (
+                            <button
+                              key={size.value}
+                              onClick={() => updateActiveTheme({ ...activeTheme, id: "custom", name: "🎨 กำหนดเอง (Custom)", fontSizeMultiplier: size.value })}
+                              className={`py-1.5 rounded-lg text-[9px] font-bold border text-center transition-all cursor-pointer ${
+                                activeTheme.fontSizeMultiplier === size.value 
+                                  ? "border-pink-600 bg-pink-50 text-pink-700" 
+                                  : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                              }`}
+                            >
+                              {size.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between bg-white p-2.5 rounded-xl border border-slate-100">
+                        <div className="flex items-center gap-1.5">
+                          <Grid className="w-4 h-4 text-slate-400" />
+                          <span className="text-[11px] font-bold text-slate-600">แสดงตารางกราฟิกตารางพื้นหลัง</span>
+                        </div>
+                        <button
+                          onClick={() => updateActiveTheme({ ...activeTheme, id: "custom", name: "🎨 กำหนดเอง (Custom)", showGridPattern: !activeTheme.showGridPattern })}
+                          className={`w-10 h-5 rounded-full transition-all relative cursor-pointer ${
+                            activeTheme.showGridPattern ? "bg-pink-600" : "bg-slate-200"
+                          }`}
+                        >
+                          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-xs transition-all ${
+                            activeTheme.showGridPattern ? "left-5" : "left-0.5"
+                          }`} />
+                        </button>
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-2">6. โลโก้องค์กร / สาขา (URL)</p>
+                        <input
+                          type="text"
+                          placeholder="https://example.com/logo.png"
+                          value={activeTheme.logoUrl || ""}
+                          onChange={(e) => updateActiveTheme({ ...activeTheme, id: "custom", name: "🎨 กำหนดเอง (Custom)", logoUrl: e.target.value })}
+                          className="w-full text-xs p-2 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-pink-500/50"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="max-w-6xl mx-auto px-4 py-3 flex flex-col lg:flex-row items-center justify-between gap-4">
+              {/* Branding Logo */}
+              <div className="flex items-center gap-2.5">
+                {activeTheme.logoUrl ? (
+                  <img src={activeTheme.logoUrl} alt="Logo" className="h-10 w-auto rounded-lg object-contain" />
+                ) : (
+                  <div className="w-10 h-10 bg-gradient-to-tr from-pink-600 to-pink-500 rounded-xl flex items-center justify-center shadow-lg shadow-pink-600/20">
+                    <span className="text-white font-black text-lg tracking-widest font-mono">Q</span>
+                  </div>
+                )}
+                <div>
+                  <h1 className="text-sm font-black text-slate-900 tracking-tight leading-none">SmartQueue <span className="text-pink-600 font-semibold text-xs bg-pink-50 px-1.5 py-0.5 rounded-sm">Pink Blossom</span></h1>
+                  <p className="text-[10px] text-slate-400 mt-1 font-medium flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 bg-pink-500 rounded-full animate-pulse inline-block"></span>
+                    ระบบจัดการคิวออนไลน์เรียลไทม์ (SSE Active)
+                  </p>
+                </div>
+              </div>
+
+              {/* View/Role Selector Buttons */}
+              <div className="flex flex-wrap lg:flex-nowrap bg-pink-50/60 p-1 rounded-2xl border border-pink-100 shadow-inner gap-1">
+                <button
+                  onClick={() => setActiveRole("customer")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    activeRole === "customer"
+                      ? "bg-pink-600 text-white shadow-md shadow-pink-600/10"
+                      : "text-pink-700 hover:text-pink-900 hover:bg-pink-50/50"
+                  }`}
+                >
+                  <Smartphone className="w-4 h-4" />
+                  หน้าจอลูกค้า (จองคิว)
+                </button>
+                <button
+                  onClick={() => setActiveRole("staff")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    activeRole === "staff"
+                      ? "bg-pink-600 text-white shadow-md shadow-pink-600/10"
+                      : "text-pink-700 hover:text-pink-900 hover:bg-pink-50/50"
+                  }`}
+                >
+                  <Users className="w-4 h-4" />
+                  บอร์ดเจ้าหน้าที่ (เรียกคิว)
+                </button>
+                <button
+                  onClick={() => setActiveRole("tv")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    activeRole === "tv"
+                      ? "bg-pink-600 text-white shadow-md shadow-pink-600/10"
+                      : "text-pink-700 hover:text-pink-900 hover:bg-pink-50/50"
+                  }`}
+                >
+                  <Tv className="w-4 h-4" />
+                  หน้าจอทีวี (TV Monitor)
+                </button>
+                <button
+                  onClick={() => setActiveRole("settings")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    activeRole === "settings"
+                      ? "bg-pink-600 text-white shadow-md shadow-pink-600/10"
+                      : "text-pink-700 hover:text-pink-900 hover:bg-pink-50/50"
+                  }`}
+                >
+                  <Settings className="w-4 h-4 text-pink-400 animate-spin-slow" />
+                  ตั้งค่าระบบและเสียงเรียก
+                </button>
+                <button
+                  onClick={() => setActiveRole("print-settings")}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                    activeRole === "print-settings"
+                      ? "bg-pink-600 text-white shadow-md shadow-pink-600/10"
+                      : "text-pink-700 hover:text-pink-900 hover:bg-pink-50/50"
+                  }`}
+                >
+                  <Printer className="w-4 h-4 text-pink-400" />
+                  ตั้งค่าการพิมพ์
+                </button>
+                
+                {/* Theme Customizer Pill Button */}
+                <button
+                  onClick={() => setShowThemePanel(!showThemePanel)}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                    showThemePanel
+                      ? "bg-pink-600 text-white border-pink-600 shadow-md shadow-pink-600/15"
+                      : "bg-pink-50/60 hover:bg-pink-100/70 text-pink-700 border-pink-100"
+                  }`}
+                >
+                  <Palette className="w-4 h-4 animate-bounce" />
+                  🎨 ตกแต่งธีมสี ({activeTheme.name.split(" ")[0]})
+                </button>
+              </div>
+
+              {/* Ticking Clock Badge & Hide Switcher */}
+              <div className="flex items-center gap-3">
+                <div className="hidden md:flex items-center gap-2 bg-pink-50/40 border border-pink-100/80 px-3 py-1.5 rounded-xl font-mono text-[10px] text-pink-700 shadow-inner">
+                  <span className="w-2.5 h-2.5 rounded-full bg-pink-500 animate-pulse"></span>
+                  <span>{currentTime.toLocaleDateString("th-TH", { weekday: "short", day: "numeric", month: "short" })}</span>
+                  <span className="font-bold text-pink-800">{currentTime.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+                </div>
+
+                <button
+                  onClick={() => setHideSwitcher(true)}
+                  title="ซ่อนแถบสวิตเซอร์นี้เพื่อแสดงผลเต็มสกรีนแท้จริง"
+                  className="text-slate-400 hover:text-slate-700 p-1.5 hover:bg-slate-100 rounded-lg transition-all text-xs font-medium flex items-center gap-1 cursor-pointer"
+                >
+                  <EyeOff className="w-4 h-4" />
+                  <span className="hidden lg:inline">ซ่อนสวิตเซอร์</span>
+                </button>
+              </div>
+            </div>
+          </header>
+        )}
+
+        {/* Floating show switcher button when switcher is hidden */}
+        {hideSwitcher && (
+          <button
+            onClick={() => setHideSwitcher(false)}
+            className="fixed bottom-4 right-4 z-40 bg-slate-900 hover:bg-slate-800 text-white py-2 px-3.5 rounded-2xl shadow-xl flex items-center gap-1.5 transition-all text-xs font-bold border border-slate-800 cursor-pointer"
+          >
+            <Eye className="w-4 h-4 text-pink-400" />
+            แสดงแถบสลับบทบาท
+          </button>
+        )}
+
+        {/* 2. Main Page Layout Grid */}
+        <main className={`flex-1 px-4 py-6 md:py-8 ${hideSwitcher ? "pt-12" : ""}`}>
+          {activeRole === "customer" && (
+            <CustomerView 
+              queues={queues} 
+              branches={branches}
+              services={services}
+              onBookQueue={handleBookQueue} 
+              lineMessages={lineMessages}
+              lineConfig={lineConfig}
+            />
+          )}
+
+          {activeRole === "staff" && (
+            <StaffView
+              queues={queues}
+              branches={branches}
+              services={services}
+              onAddQueue={handleBookQueue}
+              onCallQueue={handleCallQueue}
+              onUpdateStatus={handleUpdateStatus}
+              onResetQueues={handleResetQueues}
+              onSelectReceiptQueue={(q) => setSelectedReceiptQueue(q)}
+              onSelectReceiptQueues={(qs) => setSelectedReceiptQueues(qs)}
+            />
+          )}
+
+          {activeRole === "tv" && (
+            <TvView
+              queues={queues}
+              branches={branches}
+              services={services}
+              enableAudioAnnouncement={enableAudioAnnouncement}
+              onToggleAudioAnnouncement={() => setEnableAudioAnnouncement(!enableAudioAnnouncement)}
+              speechRate={speechRate}
+              setSpeechRate={setSpeechRate}
+              speechPitch={speechPitch}
+              setSpeechPitch={setSpeechPitch}
+              selectedVoiceName={selectedVoiceName}
+              setSelectedVoiceName={setSelectedVoiceName}
+              isAnnouncing={isAnnouncing}
+              activeTheme={activeTheme}
+            />
+          )}
+
+          {activeRole === "settings" && (
+            <SettingsView
+              branches={branches}
+              services={services}
+              onAddBranch={handleAddBranch}
+              onDeleteBranch={handleDeleteBranch}
+              onAddService={handleAddService}
+              onDeleteService={handleDeleteService}
+              speechRate={speechRate}
+              setSpeechRate={setSpeechRate}
+              speechPitch={speechPitch}
+              setSpeechPitch={setSpeechPitch}
+              selectedVoiceName={selectedVoiceName}
+              setSelectedVoiceName={setSelectedVoiceName}
+              speechEngine={speechEngine}
+              setSpeechEngine={setSpeechEngine}
+              speechSuffix={speechSuffix}
+              setSpeechSuffix={setSpeechSuffix}
+              lineConfig={lineConfig}
+              onUpdateLineConfig={handleUpdateLineConfig}
+            />
+          )}
+
+          {activeRole === "print-settings" && (
+            <PrintSettingsView />
+          )}
+
+          {activeRole === "tracking" && trackQueueId && (
+            <CustomerQueueTrackingView
+              trackQueueId={trackQueueId}
+              queues={queues}
+              lineConfig={lineConfig}
+              onExit={() => {
+                window.location.href = window.location.pathname;
+              }}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* 3. Footer */}
+      {!hideSwitcher && (
+        <footer className="bg-white border-t border-slate-200/60 py-4 px-4 text-center">
+          <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-3 text-2xs text-slate-400 font-sans">
+            <p>© 2026 ระบบจองคิวออนไลน์แบบเรียลไทม์. เชื่อมต่อระบบเสียงเรียกคิวและ LINE Notify อัจฉริยะ</p>
+            <div className="flex gap-4">
+              <span className="flex items-center gap-1">
+                <Info className="w-3.5 h-3.5 text-slate-300" />
+                รองรับการพิมพ์ตั๋วคิวจริงจากเครื่องพิมพ์ความร้อน
+              </span>
+            </div>
+          </div>
+        </footer>
+      )}
+
+      {/* 4. Receipt Printable Modal Overlay */}
+      {(selectedReceiptQueue || selectedReceiptQueues.length > 0) && (
+        <ReceiptModal
+          queue={selectedReceiptQueue}
+          queues={selectedReceiptQueues.length > 0 ? selectedReceiptQueues : undefined}
+          onClose={() => {
+            setSelectedReceiptQueue(null);
+            setSelectedReceiptQueues([]);
+          }}
+        />
+      )}
+    </div>
+  );
+}
